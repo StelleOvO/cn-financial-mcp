@@ -15,12 +15,18 @@ Data source fallback:
 
 from __future__ import annotations
 
+import asyncio
+import json as _json
+import logging
+
 import akshare as ak
 from mcp.server.fastmcp import FastMCP
 
 from ..utils.cache import TTL_DAILY, cache
 from ..utils.fallback import call_with_fallback
 from ..utils.formatter import df_to_json, error_response, slim_df
+
+logger = logging.getLogger("cn-financial-mcp")
 
 
 def register(mcp: FastMCP):
@@ -141,12 +147,34 @@ def register(mcp: FastMCP):
             # ak.stock_sector_fund_flow_rank signature:
             #   indicator: {"今日", "5日", "10日"}
             #   sector_type: {"行业资金流", "概念资金流", "地域资金流"}
-            df = ak.stock_sector_fund_flow_rank(
-                indicator=indicator, sector_type=sector_type
-            )
+            # 用 asyncio.to_thread 包装避免阻塞事件循环
+            # 重试 1 次以应对东方财富 API 偶发限流
+            df = None
+            last_error = None
+            for attempt in range(2):
+                try:
+                    df = await asyncio.to_thread(
+                        ak.stock_sector_fund_flow_rank,
+                        indicator=indicator,
+                        sector_type=sector_type,
+                    )
+                    if df is not None and not df.empty:
+                        break
+                except _json.JSONDecodeError as e:
+                    last_error = f"东方财富API返回非JSON（可能限流）: {e}"
+                    logger.warning(f"[SectorFundFlow] 第{attempt+1}次 JSON解析失败: {e}")
+                    if attempt == 0:
+                        await asyncio.sleep(1)  # 等1秒再重试
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"[SectorFundFlow] 第{attempt+1}次失败: {type(e).__name__}: {e}")
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+
             if df is None or df.empty:
                 return error_response(
-                    f"板块资金流向数据为空 ({sector_type})", "get_sector_fund_flow"
+                    f"板块资金流向数据获取失败 ({sector_type}): {last_error or '数据为空'}",
+                    "get_sector_fund_flow",
                 )
             df = slim_df(df)
             result = df_to_json(df, max_rows=30)

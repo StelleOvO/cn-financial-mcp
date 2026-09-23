@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 import akshare as ak
+import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
 from ..utils.cache import TTL_DAILY, TTL_REALTIME, cache
@@ -101,7 +102,9 @@ def register(mcp: FastMCP):
 
         Returns:
             K线数据 (JSON)，包含日期、开盘价、收盘价、最高价、最低价、
-            成交量、成交额、振幅、涨跌幅、涨跌额、换手率。
+            成交量(手)、成交额(元)、振幅、涨跌幅、涨跌额、换手率。
+            注意：东方财富源含成交量(手)和成交额(元)；
+            腾讯源仅含成交量(手)，不含成交额。
         """
         symbol = normalize_symbol(symbol)
         cache_key = f"hist_price:{symbol}:{period}:{start_date}:{end_date}:{adjust}"
@@ -136,6 +139,7 @@ def register(mcp: FastMCP):
                 ("东方财富", ak.stock_zh_a_hist, em_kwargs),
                 ("腾讯", ak.stock_zh_a_hist_tx, tx_kwargs),
             )
+            df = _label_hist_price_units(df)
             result = df_to_json(df, max_rows=500)
             cache.set(cache_key, result, TTL_DAILY)
             return result
@@ -263,3 +267,40 @@ def _find_code_col(df) -> str:
         if "代码" in c or "code" in c.lower() or "symbol" in c.lower():
             return c
     return df.columns[0]
+
+
+def _label_hist_price_units(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add unit labels to historical price columns and normalize names across sources.
+
+    - EM source (stock_zh_a_hist): Chinese column names, 成交量 in 手, 成交额 in 元
+    - Tencent source (stock_zh_a_hist_tx): English column names, 'amount' is
+      actually 成交量 in 手 (not turnover) — Tencent does not provide 成交额.
+
+    After this function, both sources have consistent Chinese column names
+    with explicit unit labels so the LLM can interpret values correctly.
+    """
+    if df is None or df.empty:
+        return df
+
+    if "date" in df.columns:
+        # Tencent source — rename English to Chinese with unit labels
+        # Note: Tencent 'amount' is volume (手), not turnover
+        rename_map = {
+            "date": "日期",
+            "open": "开盘",
+            "close": "收盘",
+            "high": "最高",
+            "low": "最低",
+            "amount": "成交量(手)",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    else:
+        # EM source — add unit labels to volume/amount columns
+        rename_map = {
+            "成交量": "成交量(手)",
+            "成交额": "成交额(元)",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    return df

@@ -14,12 +14,30 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
+import datetime as _dt
+
 import akshare as ak
 from mcp.server.fastmcp import FastMCP
 
 from ..utils.cache import TTL_DAILY, TTL_FINANCIAL, TTL_MACRO, cache
 from ..utils.formatter import df_to_json, error_response, slim_df
 from ..utils.symbol import get_exchange, normalize_symbol
+
+
+def _get_recent_weekdays(n: int = 3) -> list[str]:
+    """获取最近 n 个工作日（周一~周五），格式 YYYYMMDD。
+
+    不含节假日判断——如果当天是节假日，API 会返回空，
+    调用方按顺序尝试即可。
+    """
+    days = []
+    d = _dt.date.today()
+    while len(days) < n:
+        if d.weekday() < 5:  # Mon-Fri
+            days.append(d.strftime("%Y%m%d"))
+        d -= _dt.timedelta(days=1)
+    return days
 
 
 def register(mcp: FastMCP):
@@ -177,8 +195,20 @@ def register(mcp: FastMCP):
             return cached
 
         try:
-            df = ak.bond_china_yield(start_date="", end_date="")
-            result = df_to_json(df, max_rows=60)
+            today = _dt.date.today()
+            start = today - _dt.timedelta(days=90)
+
+            df = await asyncio.to_thread(
+                ak.bond_china_yield,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=today.strftime("%Y%m%d"),
+            )
+            if df is None or df.empty:
+                return error_response(
+                    "国债收益率数据为空（请检查 akshare bond_china_yield 接口是否可用）",
+                    "get_bond_yield_curve",
+                )
+            result = df_to_json(df, max_rows=60, from_tail=True)
             cache.set(cache_key, result, TTL_DAILY)
             return result
         except Exception as e:
@@ -206,40 +236,38 @@ def register(mcp: FastMCP):
             return cached
 
         try:
-            import datetime
-            today = datetime.date.today().strftime("%Y%m%d")
+            # 尝试最近3个工作日，避免非交易日/盘前 API 拒绝连接
+            candidate_dates = _get_recent_weekdays(3)
+            df = None
 
             if symbol:
                 symbol = normalize_symbol(symbol)
                 exchange = get_exchange(symbol)
 
-                df = None
-                # Try the appropriate exchange API based on stock code
-                if exchange == "sh":
+                for date_str in candidate_dates:
+                    if df is not None and not df.empty:
+                        break
+                    # 先尝试对应交易所
+                    primary = (
+                        ak.stock_margin_detail_sse if exchange == "sh"
+                        else ak.stock_margin_detail_szse
+                    )
                     try:
-                        df = ak.stock_margin_detail_sse(date=today)
+                        df = await asyncio.to_thread(primary, date=date_str)
                     except Exception:
                         pass
-                else:
-                    try:
-                        df = ak.stock_margin_detail_szse(date=today)
-                    except Exception:
-                        pass
-
-                # If first exchange fails, try the other
-                if df is None or df.empty:
-                    try:
-                        alt_func = (
-                            ak.stock_margin_detail_szse
-                            if exchange == "sh"
+                    # 再尝试另一个交易所
+                    if df is None or df.empty:
+                        alt = (
+                            ak.stock_margin_detail_szse if exchange == "sh"
                             else ak.stock_margin_detail_sse
                         )
-                        df = alt_func(date=today)
-                    except Exception:
-                        pass
+                        try:
+                            df = await asyncio.to_thread(alt, date=date_str)
+                        except Exception:
+                            pass
 
                 if df is not None and not df.empty:
-                    # Filter for specific stock
                     code_cols = [
                         c for c in df.columns
                         if "代码" in c or "证券代码" in c or "标的" in c
@@ -247,15 +275,29 @@ def register(mcp: FastMCP):
                     if code_cols:
                         df = df[df[code_cols[0]].astype(str).str.contains(symbol)]
             else:
-                # Return market-level summary
-                try:
-                    df = ak.stock_margin_detail_sse(date=today)
-                except Exception:
-                    df = ak.stock_margin_detail_szse(date=today)
+                # 市场汇总：逐日尝试，成功即停
+                for date_str in candidate_dates:
+                    try:
+                        df = await asyncio.to_thread(
+                            ak.stock_margin_detail_sse, date=date_str
+                        )
+                        if df is not None and not df.empty:
+                            break
+                    except Exception:
+                        pass
+                    try:
+                        df = await asyncio.to_thread(
+                            ak.stock_margin_detail_szse, date=date_str
+                        )
+                        if df is not None and not df.empty:
+                            break
+                    except Exception:
+                        pass
 
             if df is None or df.empty:
                 return error_response(
-                    f"融资融券数据为空 ({symbol})", "get_margin_trading"
+                    f"融资融券数据为空，已尝试最近3个工作日 ({symbol})",
+                    "get_margin_trading",
                 )
 
             df = slim_df(df)

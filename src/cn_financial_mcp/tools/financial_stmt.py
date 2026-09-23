@@ -14,6 +14,8 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
+
 import akshare as ak
 from mcp.server.fastmcp import FastMCP
 
@@ -21,13 +23,16 @@ from ..utils.cache import TTL_FINANCIAL, cache
 from ..utils.formatter import (
     BALANCE_SHEET_COLS,
     CASHFLOW_STATEMENT_COLS,
+    FINANCIAL_INDICATOR_COLS,
+    GROWTH_RATE_COLS,
     INCOME_STATEMENT_COLS,
+    PER_SHARE_COLS,
     df_to_json,
     error_response,
     slim_df,
     slim_financial_df,
 )
-from ..utils.symbol import format_em_symbol, normalize_symbol
+from ..utils.symbol import format_em_dot_symbol, format_em_symbol, normalize_symbol
 
 
 def register(mcp: FastMCP):
@@ -256,24 +261,28 @@ def register(mcp: FastMCP):
             num_periods: 返回最近几期数据，默认8期
 
         Returns:
-            财务指标数据 (JSON)，包含盈利能力、偿债能力、运营能力、
-            成长能力等多维度指标。
+            财务指标数据 (JSON)，包含盈利能力（ROE、ROIC、毛利率、净利率）、
+            偿债能力（资产负债率、流动比率、速动比率）、运营能力（周转率/天数）。
         """
         symbol = normalize_symbol(symbol)
+        em_dot_symbol = format_em_dot_symbol(symbol)
         cache_key = f"fin_indicators:{symbol}:{num_periods}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=symbol)
+            df = await asyncio.to_thread(
+                ak.stock_financial_analysis_indicator_em,
+                symbol=em_dot_symbol,
+            )
             if df is None or df.empty:
                 return error_response(
                     f"财务指标数据为空 ({symbol})", "get_financial_indicators"
                 )
             if num_periods > 0:
                 df = df.head(num_periods)
-            df = slim_df(df)
+            df = slim_financial_df(df, FINANCIAL_INDICATOR_COLS)
             result = df_to_json(df)
             cache.set(cache_key, result, TTL_FINANCIAL)
             return result
@@ -295,30 +304,28 @@ def register(mcp: FastMCP):
             num_periods: 返回最近几期数据，默认8期
 
         Returns:
-            成长性指标数据 (JSON)，包含各项增长率。
+            成长性指标数据 (JSON)，包含同比增长率、环比增长率、
+            单季度同比/环比等。
         """
         symbol = normalize_symbol(symbol)
+        em_dot_symbol = format_em_dot_symbol(symbol)
         cache_key = f"growth_rates:{symbol}:{num_periods}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=symbol)
+            df = await asyncio.to_thread(
+                ak.stock_financial_analysis_indicator_em,
+                symbol=em_dot_symbol,
+            )
             if df is None or df.empty:
                 return error_response(
                     f"增长指标数据为空 ({symbol})", "get_growth_rates"
                 )
-            # Filter growth-related columns
-            growth_cols = [
-                c for c in df.columns
-                if "增长" in c or "同比" in c or "环比" in c or "日期" in c or "报告" in c
-            ]
-            if growth_cols:
-                df = df[growth_cols]
             if num_periods > 0:
                 df = df.head(num_periods)
-            df = slim_df(df)
+            df = slim_financial_df(df, GROWTH_RATE_COLS)
             result = df_to_json(df)
             cache.set(cache_key, result, TTL_FINANCIAL)
             return result
@@ -340,30 +347,28 @@ def register(mcp: FastMCP):
             num_periods: 返回最近几期数据，默认8期
 
         Returns:
-            每股指标数据 (JSON)，包含EPS、BPS、每股经营现金流等。
+            每股指标数据 (JSON)，包含EPS、BPS、每股资本公积、每股未分配利润、
+            每股经营现金流，及营业总收入/净利润等金额（亿元）。
         """
         symbol = normalize_symbol(symbol)
+        em_dot_symbol = format_em_dot_symbol(symbol)
         cache_key = f"per_share:{symbol}:{num_periods}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=symbol)
+            df = await asyncio.to_thread(
+                ak.stock_financial_analysis_indicator_em,
+                symbol=em_dot_symbol,
+            )
             if df is None or df.empty:
                 return error_response(
                     f"每股指标数据为空 ({symbol})", "get_per_share_data"
                 )
-            # Filter per-share columns
-            share_cols = [
-                c for c in df.columns
-                if "每股" in c or "日期" in c or "报告" in c
-            ]
-            if share_cols:
-                df = df[share_cols]
             if num_periods > 0:
                 df = df.head(num_periods)
-            df = slim_df(df)
+            df = slim_financial_df(df, PER_SHARE_COLS)
             result = df_to_json(df)
             cache.set(cache_key, result, TTL_FINANCIAL)
             return result

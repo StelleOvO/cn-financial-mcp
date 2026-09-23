@@ -88,6 +88,83 @@ CASHFLOW_STATEMENT_COLS: list[tuple[str, str, bool]] = [
 
 
 # ──────────────────────────────────────────────────────────────────
+# Financial Indicator Column Whitelists
+#
+# For stock_financial_analysis_indicator_em (东方财富源)
+# Values are already in % / 元 / raw 元 (not 亿元)
+# ──────────────────────────────────────────────────────────────────
+
+# 盈利能力 + 偿债能力 + 运营能力 (get_financial_indicators)
+FINANCIAL_INDICATOR_COLS: list[tuple[str, str, bool]] = [
+    ("REPORT_DATE_NAME", "报告期", False),
+    ("REPORT_TYPE", "报告类型", False),
+    # 盈利能力
+    ("ROEJQ", "ROE加权(%)", False),
+    ("ROEKCJQ", "扣非ROE加权(%)", False),
+    ("ROIC", "ROIC(%)", False),
+    ("ZZCJLL", "总资产净利率(%)", False),
+    ("XSJLL", "销售净利率(%)", False),
+    ("XSMLL", "销售毛利率(%)", False),
+    ("XSJXLYYSR", "期间费用率(%)", False),
+    ("TAXRATE", "实际税率(%)", False),
+    # 偿债能力
+    ("ZCFZL", "资产负债率(%)", False),
+    ("LD", "流动比率", False),
+    ("SD", "速动比率", False),
+    ("XJLLB", "现金流量比率", False),
+    ("QYCS", "权益乘数", False),
+    ("CQBL", "产权比率", False),
+    # 运营能力
+    ("ZZCZZTS", "总资产周转天数(天)", False),
+    ("CHZZTS", "存货周转天数(天)", False),
+    ("YSZKZZTS", "应收账款周转天数(天)", False),
+    ("TOAZZL", "总资产周转率(次)", False),
+    ("CHZZL", "存货周转率(次)", False),
+    ("YSZKZZL", "应收账款周转率(次)", False),
+]
+
+# 成长能力 (get_growth_rates)
+GROWTH_RATE_COLS: list[tuple[str, str, bool]] = [
+    ("REPORT_DATE_NAME", "报告期", False),
+    ("REPORT_TYPE", "报告类型", False),
+    ("TOTALOPERATEREVETZ", "营业总收入同比增长率(%)", False),
+    ("PARENTNETPROFITTZ", "归母净利润同比增长率(%)", False),
+    ("KCFJCXSYJLRTZ", "扣非归母净利润同比增长率(%)", False),
+    ("YYZSRGDHBZC", "营业总收入环比增长率(%)", False),
+    ("NETPROFITRPHBZC", "净利润环比增长率(%)", False),
+    ("KFJLRGDHBZC", "扣非净利润环比增长率(%)", False),
+    ("EPSJBTZ", "基本每股收益同比增长率(%)", False),
+    ("BPSTZ", "每股净资产同比增长率(%)", False),
+    ("ROEJQTZ", "ROE同比增长率(%)", False),
+    # 单季度同比/环比
+    ("DJD_TOI_YOY", "单季营收同比(%)", False),
+    ("DJD_DPNP_YOY", "单季归母净利润同比(%)", False),
+    ("DJD_DEDUCTDPNP_YOY", "单季扣非净利润同比(%)", False),
+    ("DJD_TOI_QOQ", "单季营收环比(%)", False),
+    ("DJD_DPNP_QOQ", "单季归母净利润环比(%)", False),
+    ("DJD_DEDUCTDPNP_QOQ", "单季扣非净利润环比(%)", False),
+]
+
+# 每股指标 (get_per_share_data)
+PER_SHARE_COLS: list[tuple[str, str, bool]] = [
+    ("REPORT_DATE_NAME", "报告期", False),
+    ("REPORT_TYPE", "报告类型", False),
+    ("EPSJB", "基本每股收益(元)", False),
+    ("EPSKCJB", "扣非基本每股收益(元)", False),
+    ("EPSXS", "稀释每股收益(元)", False),
+    ("BPS", "每股净资产(元)", False),
+    ("MGZBGJ", "每股资本公积(元)", False),
+    ("MGWFPLR", "每股未分配利润(元)", False),
+    ("MGJYXJJE", "每股经营现金流(元)", False),
+    # 货币值（转换为亿元）
+    ("TOTALOPERATEREVE", "营业总收入(亿)", True),
+    ("MLR", "毛利润(亿)", True),
+    ("PARENTNETPROFIT", "归母净利润(亿)", True),
+    ("KCFJCXSYJLR", "扣非归母净利润(亿)", True),
+]
+
+
+# ──────────────────────────────────────────────────────────────────
 # Slim functions — make DataFrames compact for LLM consumption
 # ──────────────────────────────────────────────────────────────────
 
@@ -190,6 +267,7 @@ def df_to_json(
     orient: str = "records",
     max_rows: int | None = None,
     date_format: str = "iso",
+    from_tail: bool = False,
 ) -> str:
     """
     Convert a pandas DataFrame to a JSON string suitable for MCP tool response.
@@ -201,6 +279,8 @@ def df_to_json(
         orient: pandas to_json orient parameter. Default 'records' for list of dicts.
         max_rows: Maximum number of rows to include. None for all.
         date_format: Date format for datetime columns.
+        from_tail: If True, take the LAST max_rows (most recent for time-series
+            data sorted ascending). Default False (take first rows).
 
     Returns:
         JSON string representation of the DataFrame.
@@ -212,7 +292,10 @@ def df_to_json(
     df = df.dropna(axis=1, how="all")
 
     if max_rows is not None and len(df) > max_rows:
-        df = df.head(max_rows)
+        if from_tail:
+            df = df.tail(max_rows)
+        else:
+            df = df.head(max_rows)
 
     # Convert datetime columns to string to avoid serialization issues
     for col in df.select_dtypes(include=["datetime64", "datetimetz"]).columns:

@@ -1,5 +1,5 @@
 """
-Category 6: Market Overview & Capital Flows (V0.3)
+Category 6: Market Overview & Capital Flows (V0.5)
 
 Tools:
   26. get_market_overview  - Major index snapshots
@@ -8,11 +8,16 @@ Tools:
   29. get_limit_up_down    - Daily limit-up/limit-down pool
   30. get_dragon_tiger     - Dragon & Tiger Board (institutional activity)
 
-Data source:
-  东方财富 (eastmoney) — most functions have no alternative source
+Data source for get_market_overview (v2 多源策略 — Tier 2):
+  Tier 2 唯一源: 东方财富 (EM) — 在 Dispatcher 多源 Gate 中与 Tier 1 Sina 并行
+  降级: 腾讯日线 (Tencent) — 终极降级 (非实时)
+  注: Sina 竞速已移至 Tier 1 (scripts/fast_data.py)，MCP 内部不再重复
 """
 
 from __future__ import annotations
+
+import asyncio
+import logging
 
 import akshare as ak
 from mcp.server.fastmcp import FastMCP
@@ -21,6 +26,8 @@ from ..utils.cache import TTL_DAILY, TTL_REALTIME, cache
 from ..utils.formatter import df_to_json, error_response, slim_df
 from ..utils.symbol import get_exchange, normalize_symbol
 
+logger = logging.getLogger("cn-financial-mcp")
+
 
 def register(mcp: FastMCP):
     """Register market overview tools with the MCP server."""
@@ -28,30 +35,66 @@ def register(mcp: FastMCP):
     @mcp.tool()
     async def get_market_overview() -> str:
         """
-        获取A股主要指数实时行情快照。
+        获取A股主要指数实时行情快照 (Tier 2 — 东方财富单一源)。
 
-        包含上证指数、深证成指、创业板指、科创50、沪深300、中证500等。
+        多源策略 v2: Dispatcher 在 Step 0 同时调用 Tier 1 (Bash Sina)
+        和本工具 (MCP EM), 然后 Cross-Validate。MCP 内部不做竞速。
 
         Returns:
             主要指数实时行情 (JSON)，包含指数名称、最新点位、涨跌幅、
-            成交量、成交额等。
+            成交量、成交额、_source=mcp_em、_freshness。
         """
         cache_key = "market_overview"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
+        # ─── Tier 2: 东方财富 (EM) 单源 ───
         try:
-            # 东方财富指数行情 (unique source)
-            df = ak.stock_zh_index_spot_em()
-            df = slim_df(df)
-            result = df_to_json(df, max_rows=30)
-            cache.set(cache_key, result, TTL_REALTIME)
-            return result
+            df = await asyncio.to_thread(ak.stock_zh_index_spot_em)
+            if df is None or df.empty:
+                raise ValueError("东方财富指数行情返回为空")
+
+            slimmed = slim_df(df)
+            json_str = df_to_json(slimmed, max_rows=30)
+            import json
+            records = json.loads(json_str)
+            wrapped = {
+                "data": records,
+                "_source": "mcp_em",
+                "_freshness": "realtime",
+                "_timestamp": __import__("datetime").datetime.now().isoformat(),
+            }
+            json_str = json.dumps(wrapped, ensure_ascii=False)
+            cache.set(cache_key, json_str, TTL_REALTIME)
+            return json_str
         except Exception as e:
+            logger.warning(f"[MarketOverview] EM 失败: {type(e).__name__}: {e}")
+
+        # ─── 降级: 腾讯日线 ───
+        try:
+            from ..utils.sina_api import get_index_daily_tencent
+            df = await asyncio.to_thread(get_index_daily_tencent)
+            slimmed = slim_df(df)
+            json_str = df_to_json(slimmed, max_rows=30)
+            import json
+            records = json.loads(json_str)
+            wrapped = {
+                "data": records,
+                "_source": "tencent_daily",
+                "_freshness": "stale_previous_close",
+                "_warning": "⚠️ 东方财富实时API不可用，以下为上一交易日收盘数据",
+                "_timestamp": __import__("datetime").datetime.now().isoformat(),
+            }
+            json_str = json.dumps(wrapped, ensure_ascii=False)
+            cache.set(cache_key, json_str, TTL_REALTIME)
+            return json_str
+        except Exception as e2:
             return error_response(
-                f"获取市场概览失败: {e}", "get_market_overview"
+                f"获取市场概览失败 (EM+Tencent 全部不可用): {e2}",
+                "get_market_overview",
             )
+
 
     @mcp.tool()
     async def get_money_flow(symbol: str) -> str:
@@ -109,13 +152,14 @@ def register(mcp: FastMCP):
             # stock_hsgt_north_net_flow_in_em has been removed;
             # use stock_hsgt_hist_em which provides historical HSGT data.
             # Valid symbols: "北向资金", "沪股通", "深股通", "南向资金" etc.
-            df = ak.stock_hsgt_hist_em(symbol="北向资金")
+            df = await asyncio.to_thread(ak.stock_hsgt_hist_em, symbol="北向资金")
             if df is None or df.empty:
                 return error_response(
                     "北向资金数据为空", "get_north_bound_flow"
                 )
             df = slim_df(df)
-            result = df_to_json(df, max_rows=30)
+            # from_tail=True: 取最近30条而非最早30条（数据按日期升序排列）
+            result = df_to_json(df, max_rows=30, from_tail=True)
             cache.set(cache_key, result, TTL_DAILY)
             return result
         except Exception as e:

@@ -125,6 +125,24 @@ def format_em_symbol(code: str) -> str:
     return f"{exchange}{code}"
 
 
+def format_em_dot_symbol(code: str) -> str:
+    """
+    Format a stock code with exchange suffix for 东方财富 indicator APIs.
+
+    Some EM APIs (e.g. stock_financial_analysis_indicator_em) require
+    '600519.SH' / '000001.SZ' format (code.exchange), not 'SH600519'.
+
+    Args:
+        code: 6-digit stock code.
+
+    Returns:
+        Code with exchange suffix, e.g. '600519.SH'.
+    """
+    code = normalize_symbol(code)
+    exchange = get_exchange(code).upper()
+    return f"{code}.{exchange}"
+
+
 def is_valid_a_share_code(code: str) -> bool:
     """
     Check if a code is a valid A-share stock code.
